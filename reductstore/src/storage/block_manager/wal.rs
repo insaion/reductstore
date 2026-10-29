@@ -17,7 +17,7 @@ use reduct_base::internal_server_error;
 
 use crate::core::file_cache::{BatchToken, FileCache};
 use crate::storage::proto::Record;
-use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use byteorder::{BigEndian, ReadBytesExt};
 use std::sync::Arc;
 
 const WAL_FILE_SIZE: u64 = 1_000_000;
@@ -208,11 +208,12 @@ impl Wal for WalImpl {
 
     async fn append(&mut self, block_id: u64, entry: WalEntry) -> Result<(), ReductError> {
         let path = self.block_wal_path(block_id);
-        let mut file = if !self.file_cache.try_exists(&path).await? {
+        // Each entry overwrites the previous stop marker, so writing starts one byte before the end.
+        let (mut file, start) = if !self.file_cache.try_exists(&path).await? {
             let mut file = self.write_or_create(&path, SeekFrom::Current(0)).await?;
             file.set_len(WAL_FILE_SIZE)?;
             self.file_positions.insert(block_id, 0);
-            file
+            (file, 0)
         } else {
             let pos = match self.file_positions.entry(block_id) {
                 Occupied(e) => e.get().clone(),
@@ -225,21 +226,22 @@ impl Wal for WalImpl {
                 }
             };
 
-            self.write_or_create(&path, SeekFrom::Start(pos)).await?
+            let start = pos.saturating_sub(1);
+            (
+                self.write_or_create(&path, SeekFrom::Start(start)).await?,
+                start,
+            )
         };
 
-        if file.stream_position()? > 0 {
-            file.seek(SeekFrom::Current(-1))?;
-        }
-
-        let buf = entry.encode();
-        file.write_all(&buf)?;
+        // One write per entry: payload, CRC and stop marker.
+        let mut buf = entry.encode();
         let mut crc = Digest::new();
         crc.write(&buf);
-        file.write(&crc.sum64().to_be_bytes())?;
-        file.write_u8(STOP_MARKER)?;
+        buf.extend_from_slice(&crc.sum64().to_be_bytes());
+        buf.push(STOP_MARKER);
+        file.write_all(&buf)?;
         self.file_positions
-            .insert(block_id, file.stream_position()?);
+            .insert(block_id, start + buf.len() as u64);
         self.known_blocks.insert(block_id);
         Ok(())
     }
