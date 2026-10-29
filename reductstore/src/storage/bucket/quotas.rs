@@ -224,6 +224,7 @@ mod tests {
     use reduct_base::msg::bucket_api::{BucketSettings, QuotaType};
     use rstest::rstest;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Notify;
@@ -483,6 +484,45 @@ mod tests {
         let blob: &[u8] = &[0u8; 40];
         write(&bucket, "test-1", 0, blob).await.unwrap();
         assert!(read(&bucket, "test-1", 0).await.is_ok());
+    }
+
+    /// A free-space provider that counts how often it is asked.
+    fn counting_free_space(available: u64) -> (FreeSpaceFn, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&calls);
+        let free_space_fn: FreeSpaceFn = Arc::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(available)
+        });
+        (free_space_fn, calls)
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_free_space_measured_once_while_disk_has_wide_margin(path: PathBuf) {
+        let (free_space_fn, calls) = counting_free_space(10 << 30);
+        let bucket = bucket_with_free_space(BucketSettings::default(), path, free_space_fn).await;
+
+        for _ in 0..3 {
+            bucket.check_free_disk_space(1 << 20).await.unwrap();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_free_space_measured_every_write_near_full_disk(path: PathBuf) {
+        // Less than the 1 GiB margin free: every write asks the filesystem again.
+        let (free_space_fn, calls) = counting_free_space(512 << 20);
+        let bucket = bucket_with_free_space(BucketSettings::default(), path, free_space_fn).await;
+
+        for _ in 0..3 {
+            bucket.check_free_disk_space(1 << 20).await.unwrap();
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let err = bucket.check_free_disk_space(1 << 30).await.err().unwrap();
+        assert_eq!(err.status, ErrorCode::InsufficientStorage);
     }
 
     #[rstest]
