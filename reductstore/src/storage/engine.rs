@@ -680,8 +680,10 @@ impl StorageEngine {
 }
 
 pub(super) fn check_name_convention(name: &str) -> Result<(), ReductError> {
-    let regex = regex::Regex::new(r"^[A-Za-z0-9_-]*$").unwrap();
-    if !regex.is_match(name) {
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
         return Err(unprocessable_entity!(
             "Bucket or entry name can contain only letters, digests and [-,_] symbols",
         ));
@@ -700,8 +702,12 @@ pub(super) fn check_entry_name_convention(name: &str) -> Result<(), ReductError>
         ));
     }
 
-    let regex = regex::Regex::new(r"^[A-Za-z0-9_/-]*$").unwrap();
-    if regex.is_match(name) {
+    // Called for every write: a byte check instead of compiling a regex each time.
+    let is_valid = |name: &str| {
+        name.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'/')
+    };
+    if is_valid(name) {
         return Ok(());
     }
 
@@ -710,7 +716,7 @@ pub(super) fn check_entry_name_convention(name: &str) -> Result<(), ReductError>
         return Ok(());
     }
     if let Some(parent) = name.strip_suffix("/$meta") {
-        if regex.is_match(parent) {
+        if is_valid(parent) {
             return Ok(());
         }
     }
