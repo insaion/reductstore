@@ -84,6 +84,13 @@ impl Into<BlockEntry> for BlockProto {
 
 impl Into<BlockEntry> for Block {
     fn into(self) -> BlockEntry {
+        (&self).into()
+    }
+}
+
+// Summary of a block without cloning its record index (called for every record written).
+impl Into<BlockEntry> for &Block {
+    fn into(self) -> BlockEntry {
         BlockEntry {
             block_id: self.block_id(),
             size: self.size(),

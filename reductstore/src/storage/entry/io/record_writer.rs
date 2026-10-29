@@ -95,7 +95,7 @@ impl RecordWriter {
             let block = block_ref.read().await?;
 
             let (file_path, offset) = {
-                bm.index_mut().insert_or_update(block.to_owned());
+                bm.index_mut().insert_or_update(&*block);
                 bm.begin_write_record(&block, time)?
             };
 
