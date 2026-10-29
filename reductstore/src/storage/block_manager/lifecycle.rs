@@ -20,7 +20,7 @@ impl BlockManager {
             if self.cfg.backend_config.backend_type == BackendType::Filesystem {
                 // Pre-allocation for remote storage is inefficient
                 // because we synchronize full size even if block is empty
-                file.set_len(max_block_size)?;
+                file.preallocate(max_block_size)?;
             }
         }
 

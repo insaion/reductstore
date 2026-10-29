@@ -188,6 +188,38 @@ impl File {
         Self::run_blocking_io(|| self.inner.set_len(size))
     }
 
+    /// Reserve `size` bytes on disk and extend the file to it.
+    ///
+    /// On Linux this uses fallocate, so later writes land in allocated blocks instead of
+    /// going through delayed allocation on every write. Falls back to a sparse `set_len`
+    /// where the filesystem cannot preallocate.
+    pub fn preallocate(&mut self, size: u64) -> std::io::Result<()> {
+        if self.ignore_write {
+            return Ok(());
+        }
+
+        self.is_synced = false;
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = self.inner.as_raw_fd();
+            let res = Self::run_blocking_io(|| {
+                // SAFETY: fd is a valid descriptor owned by `self.inner` for the whole call.
+                match unsafe { libc::fallocate(fd, 0, 0, size as libc::off_t) } {
+                    0 => Ok(()),
+                    _ => Err(std::io::Error::last_os_error()),
+                }
+            });
+            match res {
+                Ok(()) => return Ok(()),
+                Err(err) if err.raw_os_error() == Some(libc::EOPNOTSUPP) => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        Self::run_blocking_io(|| self.inner.set_len(size))
+    }
+
     // Specifically for cache management
     pub fn last_synced(&self) -> std::time::Instant {
         self.last_synced
