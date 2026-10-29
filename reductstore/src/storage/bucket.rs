@@ -101,6 +101,7 @@ pub(crate) struct Bucket {
     io_limiter: InFlightIoLimiter,
     usage_counters: Arc<UsageCounters>,
     free_space_fn: FreeSpaceFn,
+    free_space_cache: std::sync::Mutex<Option<FreeSpaceSnapshot>>,
     file_cache: Arc<FileCache>,
     quota_cleanup: AsyncRwLock<()>,
     maintenance_admission: Arc<AsyncRwLock<()>>,
@@ -111,6 +112,15 @@ pub(crate) struct Bucket {
     fifo_pause: AsyncRwLock<Option<Arc<FifoPause>>>,
     #[cfg(test)]
     quota_wait_notify: AsyncRwLock<Option<Arc<Notify>>>,
+}
+
+/// Last free-space measurement and the bytes admitted since, so a write does not
+/// need a statvfs call while the disk has plenty of headroom.
+#[derive(Clone, Copy)]
+pub(super) struct FreeSpaceSnapshot {
+    measured_at: std::time::Instant,
+    available: u64,
+    admitted: u64,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]

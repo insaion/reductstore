@@ -1,7 +1,7 @@
 // Copyright 2021-2026 ReductSoftware UG
 // Licensed under the Apache License, Version 2.0
 
-use crate::storage::bucket::Bucket;
+use crate::storage::bucket::{Bucket, FreeSpaceSnapshot};
 use log::debug;
 use reduct_base::error::{ErrorCode, ReductError};
 use reduct_base::msg::bucket_api::QuotaType;
@@ -9,6 +9,10 @@ use reduct_base::{bad_request, internal_server_error};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const FREE_SPACE_CACHE_TTL: Duration = Duration::from_secs(1);
+const FREE_SPACE_CACHE_MARGIN: u64 = 1 << 30;
 
 impl Bucket {
     /// Ensure the filesystem that holds the data folder has enough free space to
@@ -18,6 +22,21 @@ impl Bucket {
     /// quota, the write is rejected early if the underlying filesystem cannot fit
     /// the record. The check runs before any data is written.
     pub(super) async fn check_free_disk_space(&self, content_size: u64) -> Result<(), ReductError> {
+        // Reuse a recent measurement while the disk keeps a wide margin after this write.
+        {
+            let mut cache = self.free_space_cache.lock().unwrap();
+            if let Some(snap) = cache.as_mut() {
+                let needed = snap
+                    .admitted
+                    .saturating_add(content_size)
+                    .saturating_add(FREE_SPACE_CACHE_MARGIN);
+                if snap.measured_at.elapsed() < FREE_SPACE_CACHE_TTL && needed <= snap.available {
+                    snap.admitted += content_size;
+                    return Ok(());
+                }
+            }
+        }
+
         let path = self.path.clone();
         let free_space_fn = self.free_space_fn.clone();
 
@@ -28,6 +47,12 @@ impl Bucket {
             .map_err(|e| {
                 internal_server_error!("Failed to query free disk space for the data folder: {}", e)
             })?;
+
+        *self.free_space_cache.lock().unwrap() = Some(FreeSpaceSnapshot {
+            measured_at: Instant::now(),
+            available,
+            admitted: content_size,
+        });
 
         if content_size > available {
             return Err(ReductError::new(
