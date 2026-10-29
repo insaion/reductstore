@@ -98,6 +98,8 @@ impl RecordWriter {
                 bm.index_mut().insert_or_update(block.to_owned());
                 bm.begin_write_record(&block, time)?
             };
+            let record_end = block.get_record(time).unwrap().end;
+            bm.allocate_ahead(block.block_id(), record_end).await?;
 
             bm.save_block(block_ref.clone()).await?;
 

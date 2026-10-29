@@ -59,6 +59,7 @@ impl BlockManager {
                 .await?;
             data_block.set_len(block_size)?;
         }
+        self.allocated_until.remove(&block_id);
 
         self.save_meta_on_disk(block.clone()).await?;
 

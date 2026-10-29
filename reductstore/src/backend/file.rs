@@ -188,6 +188,48 @@ impl File {
         Self::run_blocking_io(|| self.inner.set_len(size))
     }
 
+    /// Allocate disk blocks for `len` bytes at `offset` without changing the file size.
+    ///
+    /// Writes into allocated blocks skip the filesystem's delayed allocation, which ext4
+    /// otherwise runs on every write into a sparse file. Does nothing where the platform
+    /// or filesystem cannot preallocate.
+    pub fn allocate_range(&mut self, offset: u64, len: u64) -> std::io::Result<()> {
+        if self.ignore_write || len == 0 {
+            return Ok(());
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let fd = self.inner.as_raw_fd();
+            let res = Self::run_blocking_io(|| {
+                // SAFETY: fd is a valid descriptor owned by `self.inner` for the whole call.
+                let ret = unsafe {
+                    libc::fallocate(
+                        fd,
+                        libc::FALLOC_FL_KEEP_SIZE,
+                        offset as libc::off_t,
+                        len as libc::off_t,
+                    )
+                };
+                match ret {
+                    0 => Ok(()),
+                    _ => Err(std::io::Error::last_os_error()),
+                }
+            });
+            match res {
+                Err(err) if err.raw_os_error() == Some(libc::EOPNOTSUPP) => Ok(()),
+                res => res,
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (offset, len);
+            Ok(())
+        }
+    }
+
     // Specifically for cache management
     pub fn last_synced(&self) -> std::time::Instant {
         self.last_synced

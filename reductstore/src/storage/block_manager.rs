@@ -40,6 +40,7 @@ use reduct_base::error::ReductError;
 use reduct_base::internal_server_error;
 use reduct_base::not_found;
 use reduct_base::too_early;
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{Read, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -69,6 +70,8 @@ pub(in crate::storage) struct BlockManager {
     accepted_publication: ReplicaPublication,
     mutation_batch: Option<BatchToken>,
     file_cache: Arc<FileCache>,
+    /// End of the disk space allocated ahead of writes, per open block.
+    allocated_until: HashMap<u64, u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -145,6 +148,7 @@ impl BlockManager {
             accepted_publication: ReplicaPublication::Legacy,
             mutation_batch: None,
             file_cache,
+            allocated_until: HashMap::new(),
         })
     }
 

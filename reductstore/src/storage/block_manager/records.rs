@@ -230,6 +230,45 @@ impl BlockManager {
         Ok((path, offset))
     }
 
+    /// Allocate disk space a step ahead of a record that is about to be written.
+    ///
+    /// Block files are sparse, so without this every write goes through the filesystem's
+    /// delayed allocation. The step grows with the data already in the block, from
+    /// 64 KiB up to 8 MiB, so an entry never reserves much more than it has written.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_id` - ID of the block the record goes to.
+    /// * `record_end` - Offset of the end of the record in the block file.
+    pub async fn allocate_ahead(
+        &mut self,
+        block_id: u64,
+        record_end: u64,
+    ) -> Result<(), ReductError> {
+        const MIN_STEP: u64 = 64 * 1024;
+        const MAX_STEP: u64 = 8 * 1024 * 1024;
+
+        if self.cfg.backend_config.backend_type != BackendType::Filesystem {
+            return Ok(());
+        }
+
+        let allocated = self.allocated_until.get(&block_id).copied().unwrap_or(0);
+        if record_end <= allocated {
+            return Ok(());
+        }
+
+        let mut file = self
+            .write_or_create_mutation(&self.path_to_data(block_id), SeekFrom::Current(0))
+            .await?;
+        // Stay inside the block file: allocation past its end would outlive the block.
+        let end = (record_end + record_end.clamp(MIN_STEP, MAX_STEP))
+            .min(file.metadata()?.len())
+            .max(record_end);
+        file.allocate_range(allocated, end - allocated)?;
+        self.allocated_until.insert(block_id, end);
+        Ok(())
+    }
+
     /// Finish writing a record to a block.
     ///
     /// This method will update the record state, add WAL entry and save the block on disk if needed.
@@ -343,6 +382,43 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[rstest]
+    #[tokio::test]
+    async fn allocates_disk_space_a_bounded_step_ahead_of_writes(
+        #[future] block_manager: BlockManager,
+    ) {
+        use std::os::unix::fs::MetadataExt;
+
+        const MIB: u64 = 1024 * 1024;
+        let mut bm = block_manager.await;
+        let block = bm.start_new_block(2, 64 * MIB).await.unwrap();
+        let path = bm.path_to_data(2);
+        let allocated = |path: &PathBuf| std::fs::metadata(path).unwrap().blocks() * 512;
+
+        // A small record reserves the minimum step, not the whole block.
+        bm.allocate_ahead(2, 100).await.unwrap();
+        assert_eq!(bm.allocated_until[&2], 100 + 64 * 1024);
+        assert!(allocated(&path) < MIB);
+
+        // Writes inside the allocated range do not allocate again.
+        bm.allocate_ahead(2, 1000).await.unwrap();
+        assert_eq!(bm.allocated_until[&2], 100 + 64 * 1024);
+
+        // The step grows with the data written, up to 8 MiB.
+        bm.allocate_ahead(2, 2 * MIB).await.unwrap();
+        assert_eq!(bm.allocated_until[&2], 4 * MIB);
+        bm.allocate_ahead(2, 32 * MIB).await.unwrap();
+        assert_eq!(bm.allocated_until[&2], 40 * MIB);
+
+        // Never past the end of the block file.
+        bm.allocate_ahead(2, 60 * MIB).await.unwrap();
+        assert_eq!(bm.allocated_until[&2], 64 * MIB);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 64 * MIB);
+
+        bm.finish_block(block).await.unwrap();
+        assert!(!bm.allocated_until.contains_key(&2));
+    }
 
     #[rstest]
     #[tokio::test]
